@@ -1,107 +1,65 @@
-// commands/config.rs — manage API keys and preferences
+// utils/config.rs — reads and writes ~/.config/llmux/config.toml
 //
-// Usage:
-//   llmux config set openai sk-...
-//   llmux config set gemini AIza...
-//   llmux config list
-//   llmux config path
+// The config file stores API keys and default preferences.
+// We never print keys to stdout — only use them at call time.
 
-use crate::utils::config::Config;
-use anyhow::Result;
-use clap::{Args, Subcommand};
-use colored::Colorize;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
-#[derive(Args, Debug)]
-pub struct ConfigArgs {
-    #[command(subcommand)]
-    pub action: ConfigAction,
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Config {
+    /// API keys indexed by provider name (lowercase)
+    #[serde(default)]
+    pub keys: HashMap<String, String>,
+
+    /// Default provider to use when none is specified
+    pub default_provider: Option<String>,
+
+    /// Default model override per provider
+    #[serde(default)]
+    pub models: HashMap<String, String>,
 }
 
-#[derive(Subcommand, Debug)]
-pub enum ConfigAction {
-    /// Set an API key for a provider
-    Set {
-        /// Provider name (openai, anthropic, gemini)
-        provider: String,
-        /// Your API key
-        key: String,
-    },
-    /// Remove a key
-    Unset {
-        provider: String,
-    },
-    /// Set the default provider
-    Default {
-        provider: String,
-    },
-    /// List configured keys (masked)
-    List,
-    /// Print config file path
-    Path,
-}
-
-pub async fn run(args: ConfigArgs) -> Result<()> {
-    let mut config = Config::load()?;
-
-    match args.action {
-        ConfigAction::Set { provider, key } => {
-            let provider = provider.to_lowercase();
-            config.set_key(provider.clone(), key.clone());
-            config.save()?;
-            println!(
-                "  {} key for {} saved  {}",
-                "✓".green(),
-                provider.bold(),
-                format!("[{}…]", &key[..key.len().min(8)]).dimmed(),
-            );
-        }
-
-        ConfigAction::Unset { provider } => {
-            let provider = provider.to_lowercase();
-            config.keys.remove(&provider);
-            config.save()?;
-            println!("  {} removed key for {}", "✓".green(), provider.bold());
-        }
-
-        ConfigAction::Default { provider } => {
-            config.default_provider = Some(provider.clone());
-            config.save()?;
-            println!("  {} default provider set to {}", "✓".green(), provider.bold());
-        }
-
-        ConfigAction::List => {
-            println!();
-            if config.keys.is_empty() {
-                println!("  {} no API keys configured", "→".dimmed());
-                println!("  run {} to add one", "llmux config set <provider> <key>".cyan());
-            } else {
-                println!("  {}", "configured keys".bold());
-                for (provider, key) in &config.keys {
-                    let masked = mask_key(key);
-                    println!("  {}  {} {}", "·".dimmed(), provider.cyan(), masked.dimmed());
-                }
-            }
-            if let Some(default) = &config.default_provider {
-                println!();
-                println!("  {} default provider: {}", "→".dimmed(), default.cyan());
-            }
-            println!();
-        }
-
-        ConfigAction::Path => {
-            let path = Config::path()?;
-            println!("  {}", path.display().to_string().cyan());
-        }
+impl Config {
+    pub fn path() -> Result<PathBuf> {
+        let base = dirs::config_dir()
+            .context("could not determine config directory")?;
+        Ok(base.join("llmux").join("config.toml"))
     }
 
-    Ok(())
-}
-
-fn mask_key(key: &str) -> String {
-    if key.len() <= 8 {
-        return "••••••••".to_string();
+    pub fn load() -> Result<Self> {
+        let path = Self::path()?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str(&raw)
+            .with_context(|| format!("parsing {}", path.display()))
     }
-    let visible = &key[..4];
-    let dots = "•".repeat(key.len().min(20) - 4);
-    format!("{visible}{dots}")
+
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let raw = toml::to_string_pretty(self)?;
+        fs::write(&path, raw)?;
+        Ok(())
+    }
+
+    pub fn get_key(&self, provider: &str) -> Option<&str> {
+        self.keys.get(provider).map(String::as_str)
+    }
+
+    pub fn set_key(&mut self, provider: String, key: String) {
+        self.keys.insert(provider, key);
+    }
+
+    pub fn get_model(&self, provider: &str) -> Option<&str> {
+        self.models.get(provider).map(String::as_str)
+    }
 }
